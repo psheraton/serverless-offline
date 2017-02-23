@@ -32,6 +32,7 @@ class Offline {
     this.serverlessLog = serverless.cli.log.bind(serverless.cli);
     this.options = options;
     this.provider = 'aws';
+    this.clobberedEnv = false;
     this.start = this.start.bind(this);
 
     this.commands = {
@@ -151,6 +152,18 @@ class Offline {
     this._create404Route(); // Not found handling
 
     return this.server;
+  }
+
+  _setFunctionEnv(env) {
+      this.clobberedEnv = _.cloneDeep(process.env);
+      Object.assign(process.env, env);
+  }
+
+  _removeFunctionEnv() {
+    if (this.clobberedEnv) {
+      process.env = this.clobberedEnv;
+      this.clobberedEnv = false;
+    }
   }
 
   _setEnvironment() {
@@ -393,6 +406,7 @@ class Offline {
             auth: authStrategyName,
           },
           handler: (request, reply) => { // Here we go
+            this._setFunctionEnv(funOptions.environment);
 
             this.printBlankLine();
             this.serverlessLog(`${method} ${request.path} (λ: ${funName})`);
@@ -495,6 +509,7 @@ class Offline {
 
             // We create the context, its callback (context.done/succeed/fail) will send the HTTP response
             const lambdaContext = createLambdaContext(fun, (err, data) => {
+              this._removeFunctionEnv(fullPath, funOptions.environment);
               // Everything in this block happens once the lambda function has resolved
               debugLog('_____ HANDLER RESOLVED _____');
 
@@ -708,11 +723,22 @@ class Offline {
 
               // Promise support
               if (serviceRuntime === 'babel' && !this.requests[requestId].done) {
-                if (x && typeof x.then === 'function' && typeof x.catch === 'function') x.then(lambdaContext.succeed).catch(lambdaContext.fail);
-                else if (x instanceof Error) lambdaContext.fail(x);
+                if (x && typeof x.then === 'function' && typeof x.catch === 'function') {
+                  x.then(function(res) {
+                    this._removeFunctionEnv();
+                    return lambdaContext.succeed(res);
+                  }).catch(function(err) {
+                    this._removeFunctionEnv();
+                    return lambdaContext.fail(err);
+                  });
+                } else if (x instanceof Error) {
+                  this._removeFunctionEnv();
+                  lambdaContext.fail(x);
+                }
               }
             }
             catch (error) {
+              this._removeFunctionEnv();
               return this._reply500(response, `Uncaught error in your '${funName}' handler`, error, requestId);
             }
           },
@@ -720,6 +746,8 @@ class Offline {
       });
     });
   }
+
+
 
   // All done, we can listen to incomming requests
   _listen() {
